@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:id="@+id/root"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/bg_dark"
+        android:orientation="vertical"
+        android:paddingTop="40dp"
+        android:paddingLeft="20dp"
+        android:paddingRight="64dp">
+
+        <TextView
+            android:id="@+id/date"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="15sp"
+            android:textColor="@color/text2_dark"/>
+
+        <TextView
+            android:id="@+id/clock"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="58sp"
+            android:fontFamily="sans-serif-light"
+            android:textColor="@color/text_dark"
+            android:layout_marginBottom="8dp"/>
+
+        <LinearLayout
+            android:id="@+id/widgets"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp"/>
+
+        <ListView
+            android:id="@+id/list"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="@null"
+            android:dividerHeight="0dp"
+            android:scrollbars="none"
+            android:overScrollMode="never"
+            android:paddingBottom="90dp"
+            android:clipToPadding="false"/>
+    </LinearLayout>
+
+    <view
+        class="com.salman.wavelauncher.WaveRailView"
+        android:id="@+id/rail"
+        android:layout_width="64dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="right|center_vertical"
+        android:layout_marginTop="80dp"
+        android:layout_marginBottom="90dp"/>
+
+    <LinearLayout
+        android:id="@+id/widgetsBottom"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginLeft="16dp"
+        android:layout_marginRight="16dp"
+        android:layout_marginBottom="64dp"
+        android:orientation="vertical"/>
+
+
+    <TextView
+        android:id="@+id/corner"
+        android:layout_width="46dp"
+        android:layout_height="46dp"
+        android:layout_gravity="right|bottom"
+        android:layout_margin="12dp"
+        android:gravity="center"
+        android:text="⋮⋮"
+        android:textSize="16sp"
+        android:textColor="@color/text_dark"/>
+
+</FrameLayout>
