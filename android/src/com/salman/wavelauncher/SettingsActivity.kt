@@ -107,6 +107,12 @@ class SettingsActivity : BaseLauncherActivity() {
             caption(if (paused) "Work apps are currently paused (hidden apps stay in drawer? no — paused profile apps do not launch)" else "Work apps are active")
         }
 
+        section("Debug")
+        hintSlider("Rail hint offset above touch", s.scrollHintOffsetDp) { v ->
+            saveSettings(s.copy(scrollHintOffsetDp = v))
+        }
+        caption("Height of the letter chip above your finger while scrolling. 24dp sits under the fingertip; raise it until the chip clears your finger. Applies live.")
+
         section("System")
         action("Notification access (for dots)") {
             safeStart(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -195,6 +201,32 @@ class SettingsActivity : BaseLauncherActivity() {
         seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: android.widget.SeekBar?, v: Int, fromUser: Boolean) {
                 label.text = "$name — $v%"
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                onChange(sb?.progress ?: value)
+            }
+        })
+        col2.addView(label)
+        col2.addView(seek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        col.addView(col2)
+    }
+
+    private fun hintSlider(name: String, value: Int, onChange: (Int) -> Unit) {
+        val col2 = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col2.setPadding(0, dp(14), 0, dp(6))
+        val label = TextView(this).apply {
+            text = "$name — ${value}dp"
+            textSize = 15.5f; setTextColor(Theme.text(settings))
+        }
+        val seek = android.widget.SeekBar(this).apply {
+            max = 300
+            progress = value
+            keyProgressIncrement = 12
+        }
+        seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, v: Int, fromUser: Boolean) {
+                label.text = "$name — ${v}dp"
             }
             override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
             override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {

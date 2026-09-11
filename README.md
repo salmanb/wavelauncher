@@ -8,8 +8,7 @@ With the recent release of https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DG
 
 ### Home
 - Minimal single-column app list built from PackageManager, every row shows its real app icon
-- **Wave alphabet rail** on the right edge — letters swing out over the list as their app row crosses the top of the screen, then dock tilted. Drag the rail to scrub by letter with a magnifier bubble showing the target letter.
-  - **⚠ Known bug:** the wave motion is still buggy — letters do not consistently arc/flow the way Niagara's does. Treat the rail as a working letter-jump scrubber with experimental wave animation, not a finished effect. See `WaveRailView.kt`.
+- **Alphabet rail** on the right edge — fixed letter slots; the letter of the section at the top of the list renders bigger in the accent color. Drag the rail to scrub by letter; a bubble shows the target letter floating above your finger (offset tunable in Settings → Debug). While scrolling the list by touch, a chip with the current letter floats above the touch point.
 - **Categories** — create named groups (Favorites, Media, …), pinned at the top under a `CATEGORIES` banner, collapsible (tap the header), sorted A–Z, hidden until the first one exists. Long-press any app → Categories… to assign; long-press a category header to edit/delete.
 - **Folders** — pop-up folder cards under a `FOLDERS` banner, also A–Z and hidden until non-empty. Long-press app → Folders…; tap a folder row to open its app list.
 - **Work profile** — show work apps in the list (badged icons, correct user-handle launch) and pause/unpause the profile from Settings; a "PAUSED" banner shows when quiet mode is on.
@@ -61,7 +60,6 @@ Pipeline: aapt2 compile/link → kotlinc → d8 (Kotlin stdlib merged) → zipal
 
 ## Known issues
 
-- **Wave rail animation is buggy** — see above. Scrubbing/jump works; the arc effect does not yet match Niagara.
 - Widget long-press (remove) is unreliable because host views can swallow touches — use Settings → Widgets → Manage instead.
 - Folder/category dialogs are functional, not pretty.
 - Icon packs, widget resizing, notification inline reply: not yet.
@@ -69,5 +67,5 @@ Pipeline: aapt2 compile/link → kotlinc → d8 (Kotlin stdlib merged) → zipal
 ## Repo layout
 
 - `android/` — the launcher (Kotlin, no Gradle; `build.sh` is the build)
-- `android/src/com/salman/wavelauncher/WaveRailView.kt` — the wave rail (known-buggy animation lives here)
+- `android/src/com/salman/wavelauncher/WaveRailView.kt` — the alphabet rail (scrub, current-letter highlight, touch bubble)
 - `mock/` — the original interactive HTML mock the launcher was designed from, with Playwright verification scripts

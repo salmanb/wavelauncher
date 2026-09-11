@@ -16,7 +16,8 @@ data class LauncherSettings(
     var h24: Boolean = false,
     var wallpaperUri: String = "",
     var showWork: Boolean = false,
-    var wallpaperDim: Int = 45
+    var wallpaperDim: Int = 45,
+    var scrollHintOffsetDp: Int = 300
 )
 
 object LauncherPrefs {
@@ -47,7 +48,8 @@ object LauncherPrefs {
             h24 = p.getBoolean("h24", false),
             wallpaperUri = p.getString("wallpaperUri", "") ?: "",
             showWork = p.getBoolean("showWork", false),
-            wallpaperDim = p.getInt("wallpaperDim", 45)
+            wallpaperDim = p.getInt("wallpaperDim", 45),
+            scrollHintOffsetDp = p.getInt("scrollHintOffsetDp", 300)
         )
     }
 
@@ -64,6 +66,7 @@ object LauncherPrefs {
             .putString("wallpaperUri", s.wallpaperUri)
             .putBoolean("showWork", s.showWork)
             .putInt("wallpaperDim", s.wallpaperDim)
+            .putInt("scrollHintOffsetDp", s.scrollHintOffsetDp)
             .apply()
     }
 

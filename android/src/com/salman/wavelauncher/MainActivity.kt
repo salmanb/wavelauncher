@@ -79,7 +79,6 @@ class MainActivity : BaseLauncherActivity() {
         list.adapter = adapter
 
         list.setOnItemClickListener { _, _, pos, _ -> adapter.launch(pos) }
-        SwipeDetect.install(list) { openSearch() }
 
         findViewById<TextView>(R.id.corner).setOnClickListener { openDrawer() }
 
@@ -198,6 +197,7 @@ class MainActivity : BaseLauncherActivity() {
         rail.accentColor = accent
         rail.textColor = Theme.text2(s)
         rail.dark = Theme.isDark(s)
+        rail.hintOffsetPx = dp(settings.scrollHintOffsetDp.coerceIn(24, 400)).toFloat()
         adapter.notifyDataSetChanged()
     }
 
@@ -647,44 +647,90 @@ class MainActivity : BaseLauncherActivity() {
             val pos = letterRowIndex.getOrElse(idx) { -1 }
             if (pos >= 0) list.setSelectionFromTop(pos, 0)
         }
-        rail.onDragEnd = { rail.waveAmp = 0f }
+        rail.onDragEnd = { rail.hideScrollHint() }
 
         list.setOnScrollListener(object : AbsScrollListener() {
             override fun onScroll(view: AbsListView, first: Int, visibleItemCount: Int, totalItemCount: Int) {
                 updateWave()
+                if (scrollTouchY >= 0f) showHintAt(scrollTouchY)
             }
         })
         updateWave()
+        list.setOnTouchListener { v, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    scrollTouchY = ev.rawY
+                    swipeStartY = ev.y
+                    showHintAt(ev.rawY)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    scrollTouchY = ev.rawY
+                    showHintAt(ev.rawY)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    scrollTouchY = -1f
+                    rail.hideScrollHint()
+                    val dy = ev.y - swipeStartY
+                    if (dy > 140 && list.firstVisiblePosition == 0 &&
+                        (list.getChildAt(0)?.top ?: 0) >= 0) {
+                        openSearch()
+                    }
+                }
+            }
+            v.onTouchEvent(ev)
+        }
     }
 
     private fun updateWave() {
         val total = adapter.count
         if (total == 0 || rail.letters.isEmpty()) return
         val first = list.firstVisiblePosition
-        val delta = (first - lastFirst).toFloat()
-        lastFirst = first
-        val v = abs(delta) * 0.9f
-        rail.waveAmp = (rail.waveAmp + (v - rail.waveAmp) * 0.3f).coerceIn(0f, 6f)
 
-        val relY = IntArray(rail.letters.size)
-        val childH = if (list.childCount > 0) list.getChildAt(0).height else 120
-        for (li in rail.letters.indices) {
-            val rowIdx = letterRowIndex.getOrElse(li) { -1 }
-            relY[li] = when {
-                rowIdx < 0 -> 10_000
-                rowIdx < first -> -1000 - li * 4        // above viewport: docked, order-preserving
-                rowIdx < first + list.childCount -> {
-                    val child = list.getChildAt(rowIdx - first)
-                    child?.top ?: ((rowIdx - first) * childH)
-                }
-                else -> 10_000                          // below viewport: upright
+        // current letter = the letter of the topmost visible row
+        rail.currentLetterIndex = run {
+            var idx = -1
+            for (i in 0 until list.childCount) {
+                val row = adapter.getItem(first + i) ?: continue
+                val L = when (row) {
+                    is HomeRow.App -> row.app.letter
+                    is HomeRow.Section -> row.letter
+                    is HomeRow.Folder -> row.name.take(1).uppercase()
+                    else -> null
+                } ?: continue
+                idx = rail.letters.indexOf(L)
+                if (idx >= 0) break
             }
+            idx
         }
-        rail.letterRelY = relY
     }
 
-    private var lastFirst = 0
     private var letterRowIndex: IntArray = IntArray(0)
+
+    /** y (list coords) of the finger while scrolling; -1 = not touching */
+    private var scrollTouchY: Float = -1f
+    private var swipeStartY: Float = 0f
+
+    /** show the current-letter bubble at a screen-space y, converted to rail coords */
+    private fun showHintAt(rawY: Float) {
+        val loc = IntArray(2)
+        rail.getLocationOnScreen(loc)
+        topLetter()?.let { rail.showScrollHint(it, rawY - loc[1]) }
+    }
+
+    private fun topLetter(): String? {
+        val first = list.firstVisiblePosition
+        for (i in 0 until list.childCount) {
+            val row = adapter.getItem(first + i) ?: continue
+            val L = when (row) {
+                is HomeRow.App -> row.app.letter
+                is HomeRow.Section -> row.letter
+                is HomeRow.Folder -> row.name.take(1).uppercase()
+                else -> null
+            }
+            if (L != null) return L
+        }
+        return null
+    }
     private val expandedCategories = HashSet<String>()
 
     private fun catMembers(name: String): Set<String> =
@@ -1187,23 +1233,3 @@ sealed class HomeRow {
     data class SectionBanner(val label: String) : HomeRow()
 }
 
-/** minimal swipe-down detection without VelocityTracker plumbing */
-object SwipeDetect {
-    fun install(list: ListView, onSwipeDown: () -> Unit) {
-        var startY = 0f
-        list.setOnTouchListener { v, e ->
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> startY = e.y
-                MotionEvent.ACTION_UP -> {
-                    val dy = e.y - startY
-                    val lv = v as ListView
-                    if (dy > 140 && lv.firstVisiblePosition == 0 &&
-                        (lv.getChildAt(0)?.top ?: 0) >= 0) {
-                        onSwipeDown()
-                    }
-                }
-            }
-            false
-        }
-    }
-}

@@ -2,21 +2,20 @@ package com.salman.wavelauncher
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
-import kotlin.math.abs
-import kotlin.math.min
-import kotlin.math.sin
 
 /**
- * The wave alphabet rail. MainActivity feeds `letterRelY`: each letter's row
- * position relative to the viewport top (negative = scrolled past). Letters
- * that just passed the top keep a docked-tilted pose; letters in the
- * transition zone trace a continuous rotation curve, so the visible letters
- * flow into an arc. Scroll velocity (`waveAmp`) pulses the amplitude.
+ * The wave alphabet rail, simplified. Letters sit in fixed slots. The letter
+ * of the list section currently at the viewport top renders bigger and in the
+ * accent color. While the user drags the list, a bubble showing the current
+ * letter floats above the touch point (MainActivity feeds it via
+ * showScrollHint/hideScrollHint). Dragging the rail itself still scrubs by
+ * letter with the magnifier bubble.
  */
 class WaveRailView @JvmOverloads constructor(
     context: Context,
@@ -26,12 +25,12 @@ class WaveRailView @JvmOverloads constructor(
     var letters: List<String> = emptyList()
         set(value) { field = value; requestLayout(); invalidate() }
 
-    /** viewport-relative Y (px) of each letter's first row; negative = passed */
-    var letterRelY: IntArray = IntArray(0)
-        set(value) { field = value; invalidate() }
+    /** rail index of the letter currently at the top of the list; -1 = none */
+    var currentLetterIndex: Int = -1
+        set(value) { if (field != value) { field = value; invalidate() } }
 
-    var waveAmp: Float = 0f
-        set(value) { if (abs(field - value) > 0.3f) { field = value; invalidate() } }
+    /** vertical offset of the scroll-hint bubble above the touch point (px) */
+    var hintOffsetPx: Float = 120f * resources.displayMetrics.density
 
     var onLetterDrag: ((index: Int, letter: String) -> Unit)? = null
     var onDragEnd: (() -> Unit)? = null
@@ -44,6 +43,11 @@ class WaveRailView @JvmOverloads constructor(
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
     }
+    private val bubbleText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+    }
+    private val bubbleBg = Paint(Paint.ANTI_ALIAS_FLAG)
     private val magPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
@@ -54,59 +58,57 @@ class WaveRailView @JvmOverloads constructor(
     private var dragLetter = ""
     private var dragY = 0f
 
+    private var hintLetter: String? = null
+    private var hintY = 0f
+
+    /** show the current-letter bubble above the list touch point (rail coords) */
+    fun showScrollHint(letter: String, y: Float) {
+        if (letter.isEmpty()) return
+        hintLetter = letter
+        hintY = y
+        invalidate()
+    }
+
+    fun hideScrollHint() {
+        if (hintLetter != null) {
+            hintLetter = null
+            invalidate()
+        }
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val n = letters.size
-        if (n == 0 || letterRelY.size != n) return
+        if (n == 0) return
         val step = height.toFloat() / (n + 1)
         val cx = width / 2f
-        val pulse = 1f + min(waveAmp, 6f) * 0.25f
 
         for (i in 0 until n) {
-            val rel = letterRelY[i].toFloat()
-            val y = step * (i + 1)          // fixed slot — letters never move vertically
-
-            var xOut = 0f
-            var rot = 0f
-            var alpha = 235f
-            var size = 11.5f
-
-            when {
-                rel < -10f -> {                    // row scrolled past: docked tilt
-                    xOut = 9f.dpi * pulse
-                    rot = 42f
-                    alpha = 72f
-                    size = 10.5f
-                }
-                rel < 150f -> {                    // transition: swing out over the list
-                    val t = 1f - (rel / 150f).coerceIn(0f, 1f)
-                    val swing = sin(t * Math.PI).toFloat() * 10f.dpi * pulse
-                    xOut = swing
-                    rot = swing * 3.4f
-                    alpha = 235f
-                    size = 11.5f
-                }
-                else -> { }                        // below crest: upright
-            }
-
-            val active = rel > -40f && rel < 120f
-            paint.textSize = (if (active) 15f else size).sp
+            val active = i == currentLetterIndex
+            paint.textSize = (if (active) 17.5f else 11.5f).sp
             paint.color = if (active) accentColor else textColor
-            paint.alpha = alpha.toInt().coerceIn(0, 255)
-
-            canvas.save()
-            canvas.translate(cx - xOut, y)
-            if (rot > 0.5f) canvas.rotate(rot)
-            canvas.drawText(letters[i], 0f, paint.textSize / 3f, paint)
-            canvas.restore()
+            paint.alpha = if (active) 255 else 200
+            val y = step * (i + 1)
+            canvas.drawText(letters[i], cx, y + paint.textSize / 3f, paint)
         }
 
+        hintLetter?.let { drawBubble(canvas, it, hintY) }
         if (dragging) drawMagnifier(canvas)
     }
 
-    private data class Pose(val xOut: Float, val rot: Float, val alpha: Float, val size: Float)
-
-    private fun dockX(): Float = 7f.dpi
+    /** accent chip with the current letter, floating well above the touch point */
+    private fun drawBubble(canvas: Canvas, letter: String, y: Float) {
+        bubbleText.textSize = 22f.sp
+        val w = bubbleText.measureText(letter) + 26f.dpi
+        val h = 40f.dpi
+        val right = -10f.dpi                       // just left of the rail edge
+        val top = (y - hintOffsetPx - h / 2f).coerceIn(6f, height - h - 6f)
+        bubbleBg.color = accentColor
+        canvas.drawRoundRect(right - w, top, right, top + h, 13f.dpi, 13f.dpi, bubbleBg)
+        bubbleText.color = if (dark) Color.BLACK else Color.WHITE
+        bubbleText.alpha = 255
+        canvas.drawText(letter, right - w / 2f, top + h / 2f + bubbleText.textSize / 3f, bubbleText)
+    }
 
     private fun drawMagnifier(canvas: Canvas) {
         val text = dragLetter
@@ -114,9 +116,9 @@ class WaveRailView @JvmOverloads constructor(
         magPaint.color = accentColor
         val w = magPaint.measureText(text) + 28f.dpi
         val x = width - w - 12f.dpi
-        val y = dragY.coerceIn(30f, height - 30f)
+        val top = (dragY - hintOffsetPx).coerceIn(6f, height - 46f.dpi)
         canvas.save()
-        canvas.translate(x, y - 14f.dpi)
+        canvas.translate(x, top)
         bgPaint.color = if (dark) 0xFF1B1F24.toInt() else 0xFFFFFFFF.toInt()
         canvas.drawRoundRect(0f, 0f, w, 40f.dpi, 12f.dpi, 12f.dpi, bgPaint)
         magPaint.alpha = 255
@@ -156,6 +158,10 @@ class WaveRailView @JvmOverloads constructor(
         dragLetter = letters[idx]
         onLetterDrag?.invoke(idx, dragLetter)
         invalidate()
+    }
+
+    private companion object {
+        const val BASE_SP = 11.5f
     }
 
     private val Float.sp: Float get() = this * resources.displayMetrics.scaledDensity
