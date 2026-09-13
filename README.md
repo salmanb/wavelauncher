@@ -8,28 +8,27 @@ With the recent release of https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DG
 
 ### Home
 - Minimal single-column app list built from PackageManager, every row shows its real app icon
-- **Alphabet rail** on the right edge — fixed letter slots; the letter of the section at the top of the list renders bigger in the accent color. Drag the rail to scrub by letter; a bubble shows the target letter floating above your finger (offset tunable in Settings → Debug). While scrolling the list by touch, a chip with the current letter floats above the touch point.
-- **Categories** — create named groups (Favorites, Media, …), pinned at the top under a `CATEGORIES` banner, collapsible (tap the header), sorted A–Z, hidden until the first one exists. Long-press any app → Categories… to assign; long-press a category header to edit/delete.
-- **Folders** — pop-up folder cards under a `FOLDERS` banner, also A–Z and hidden until non-empty. Long-press app → Folders…; tap a folder row to open its app list.
-- **Work profile** — show work apps in the list (badged icons, correct user-handle launch) and pause/unpause the profile from Settings; a "PAUSED" banner shows when quiet mode is on.
+- **Alphabet rail** on the right edge — fixed letter slots; the letter of the section at the top of the list renders bigger in the accent color. Drag the rail to scrub by letter; a bubble shows the target letter floating above your finger. While scrolling the list by touch, a chip with the current letter floats above the touch point.
+- **Dock** — a bottom bar apps and folders can be added to. Drag an app from the list onto the dock to add it; drag onto a folder to add it to that folder; hold-still on a dock item for a menu (open / remove); hold-then-move to reorder or drag out to remove. Long-press the empty dock to create a new folder.
+- **Folders** — live only in the dock. Tap a folder to open its apps in a card that pops up right above the folder icon (4-column grid). Drag apps into a folder to add them. Long-press an app inside a folder for the app menu.
+- **App menu** — long-press any app (list or folder): add to dock, folders, app info, uninstall.
+- **Work profile** — show work apps in the list (badged icons, correct user-handle launch) and pause/unpause the profile from Settings.
 - Settings is the last row of the app list.
-- App drawer (bottom-right ⋮⋮ button) with instant filter.
 
 ### Widgets
-- Real `AppWidgetHost` integration: widget picker with live preview grid (two columns)
-- Place any widget **top of list** or **bottom bar** (e.g. Google search widget at the bottom)
-- Widget config activities supported; list scrolls above bottom widgets
+- Real `AppWidgetHost` integration: widget picker with live preview grid
+- Widgets sit above the app list
 - **Update-proof persistence** — widget ids are re-derived from the system on every start (orphaned bindings get adopted), transient post-update nulls are retried, never pruned on first miss
-- Manage / remove / move widgets from Settings → Widgets
+- Manage / remove widgets from Settings → Widgets
 
 ### Search (swipe down on home)
 - Apps by name, contacts (opens contact card, prompts for permission), inline calculator with a real expression parser (`12*7+2`, `23*4/5`), web search fallback
 
 ### Theming
-- Dark / Light / **Wallpaper** modes; wallpaper picked via system image picker
+- Dark / Light / **Wallpaper** modes
 - Text-readability dim slider for wallpaper mode (black scrim 0–90%)
-- 4 accent colors, 4 font choices (applies to clock/date/rows), clock size 36–76sp, icon shape rounded/circle
-- 24-hour clock toggle; settings persist in SharedPreferences
+- 4 accent colors, 4 font choices, icon shape rounded/circle
+- Settings persist in SharedPreferences
 
 ### Notifications
 - Per-app notification dots on home rows via `NotificationListenerService` (grant Notification access on first run)
@@ -43,8 +42,7 @@ Build the APK (below), then:
 3. First run:
    - Settings → Apps → Default apps → Home app → **Wave Launcher**
    - Settings → Special app access → Notification access → enable **Wave Launcher** (powers the dots)
-   - Contacts search prompts for contacts permission on first use.
-   - Settings → Widgets → Add widget to home to place widgets; Manage / remove widgets to edit them later.
+   - Settings → Widgets → Add widget to home to place widgets.
 
 ## Build from source
 
@@ -58,14 +56,24 @@ cd android && ./build.sh
 
 Pipeline: aapt2 compile/link → kotlinc → d8 (Kotlin stdlib merged) → zipalign → apksigner. A debug keystore is generated on first build.
 
-## Known issues
+## Screenshots
 
-- Widget long-press (remove) is unreliable because host views can swallow touches — use Settings → Widgets → Manage instead.
-- Folder/category dialogs are functional, not pretty.
-- Icon packs, widget resizing, notification inline reply: not yet.
+Drop screenshots into `screenshots/` and they render here:
+
+<p float="left">
+  <img src="screenshots/home.png" width="200" />
+  <img src="screenshots/dock.png" width="200" />
+  <img src="screenshots/folder.png" width="200" />
+</p>
+
+- `home.png` — app list + alphabet rail
+- `dock.png` — dock with apps and folders
+- `folder.png` — folder popup grid
 
 ## Repo layout
 
 - `android/` — the launcher (Kotlin, no Gradle; `build.sh` is the build)
 - `android/src/com/salman/wavelauncher/WaveRailView.kt` — the alphabet rail (scrub, current-letter highlight, touch bubble)
 - `mock/` — the original interactive HTML mock the launcher was designed from, with Playwright verification scripts
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.

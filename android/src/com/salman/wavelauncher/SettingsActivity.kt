@@ -45,16 +45,13 @@ class SettingsActivity : BaseLauncherActivity() {
         col.removeAllViews()
 
         title("Settings")
-        caption("Wave Launcher v0.2 — open-source Niagara-style")
+        caption("Wave Launcher v${packageManager.getPackageInfo(packageName, 0).versionName} — open-source Niagara-style")
 
         section("Theme")
         stepper("Theme mode", LauncherPrefs.THEME_MODES[s.themeMode]) {
             saveSettings(s.copy(themeMode = (s.themeMode + 1) % LauncherPrefs.THEME_MODES.size))
         }
         if (s.themeMode == 2) {
-            action(if (s.wallpaperUri.isEmpty()) "Pick wallpaper image" else "Change wallpaper image") {
-                pickWallpaper()
-            }
             dimSlider("Text readability (background dim)", s.wallpaperDim) { v ->
                 saveSettings(s.copy(wallpaperDim = v))
             }
@@ -68,15 +65,9 @@ class SettingsActivity : BaseLauncherActivity() {
         }
 
         section("Home screen")
-        stepper("Clock size", "${s.clockSizeSp}sp") {
-            val next = if (s.clockSizeSp >= 76) 36 else s.clockSizeSp + 6
-            saveSettings(s.copy(clockSizeSp = next))
-        }
         stepper("Icon shape", LauncherPrefs.ICON_SHAPES[s.iconShape]) {
             saveSettings(s.copy(iconShape = (s.iconShape + 1) % LauncherPrefs.ICON_SHAPES.size))
         }
-        toggle("24-hour clock", s.h24) { v -> saveSettings(s.copy(h24 = v)) }
-        action("Manage categories") { manageCategories() }
 
         section("Widgets")
         action("Add widget to home") { pickWidget() }
@@ -112,6 +103,14 @@ class SettingsActivity : BaseLauncherActivity() {
             saveSettings(s.copy(scrollHintOffsetDp = v))
         }
         caption("Height of the letter chip above your finger while scrolling. 24dp sits under the fingertip; raise it until the chip clears your finger. Applies live.")
+        seekSlider("Dock icon size", s.dockIconSizeDp, 14, 48, "dp") { v ->
+            saveSettings(s.copy(dockIconSizeDp = v))
+        }
+        caption("Size of the app icons in the bottom dock. Applies live.")
+        seekSlider("Dock transparency", s.dockOpacity, 0, 90, "%") { v ->
+            saveSettings(s.copy(dockOpacity = v))
+        }
+        caption("0% = solid dock bar, higher = more transparent. Applies live.")
 
         section("System")
         action("Notification access (for dots)") {
@@ -227,6 +226,32 @@ class SettingsActivity : BaseLauncherActivity() {
         seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: android.widget.SeekBar?, v: Int, fromUser: Boolean) {
                 label.text = "$name — ${v}dp"
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                onChange(sb?.progress ?: value)
+            }
+        })
+        col2.addView(label)
+        col2.addView(seek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        col.addView(col2)
+    }
+
+    private fun seekSlider(name: String, value: Int, minV: Int, maxV: Int, unit: String, onChange: (Int) -> Unit) {
+        val col2 = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col2.setPadding(0, dp(14), 0, dp(6))
+        val label = TextView(this).apply {
+            text = "$name — $value$unit"
+            textSize = 15.5f; setTextColor(Theme.text(settings))
+        }
+        val seek = android.widget.SeekBar(this).apply {
+            max = maxV
+            progress = value.coerceIn(minV, maxV)
+            keyProgressIncrement = 2
+        }
+        seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, v: Int, fromUser: Boolean) {
+                label.text = "$name — $v$unit"
             }
             override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
             override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {

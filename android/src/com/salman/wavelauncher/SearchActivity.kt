@@ -28,6 +28,7 @@ class SearchActivity : BaseLauncherActivity() {
     private lateinit var results: ListView
     private lateinit var adapter: ResultAdapter
     private var apps: List<AppEntry> = emptyList()
+    private var askedContacts = false
     private var contacts: List<ContactEntry> = emptyList()
     private val rows = ArrayList<SearchRow>()
 
@@ -59,11 +60,10 @@ class SearchActivity : BaseLauncherActivity() {
         adapter = ResultAdapter()
         results.adapter = adapter
 
-        apps = AppLoader.loadApps(this)
-
         Thread {
+            val a = AppLoader.loadApps(this)
             val c = AppLoader.loadContacts(this)
-            runOnUiThread { contacts = c; rebuild() }
+            runOnUiThread { apps = a; contacts = c; rebuild() }
         }.start()
 
         input.addTextChangedListener(object : TextWatcher {
@@ -90,8 +90,9 @@ class SearchActivity : BaseLauncherActivity() {
                 rows.add(SearchRow.CalcRow(q, MathParser.format(v)))
             }
             apps.filter { it.label.lowercase().contains(ql) }.take(6).forEach { rows.add(SearchRow.AppRow(it)) }
-            if (contacts.isEmpty() &&
+            if (!askedContacts && contacts.isEmpty() &&
                 checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+                askedContacts = true
                 requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 1)
             }
             contacts.filter { it.name.lowercase().contains(ql) }.take(4).forEach { rows.add(SearchRow.ContactRow(it)) }

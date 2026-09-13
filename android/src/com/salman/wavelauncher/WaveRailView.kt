@@ -154,7 +154,7 @@ class WaveRailView @JvmOverloads constructor(
         val n = letters.size
         if (n == 0) return
         val step = height.toFloat() / (n + 1)
-        val idx = ((y / step).toInt() - 1).coerceIn(0, n - 1)
+        val idx = (Math.round(y / step) - 1).coerceIn(0, n - 1)
         dragLetter = letters[idx]
         onLetterDrag?.invoke(idx, dragLetter)
         invalidate()

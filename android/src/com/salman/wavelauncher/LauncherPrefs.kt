@@ -6,7 +6,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class LauncherSettings(
-    var dark: Boolean = true,
     var themeMode: Int = 0,          // 0 dark, 1 light, 2 wallpaper
     var accentIndex: Int = 0,
     var clockSizeSp: Int = 58,
@@ -17,7 +16,10 @@ data class LauncherSettings(
     var wallpaperUri: String = "",
     var showWork: Boolean = false,
     var wallpaperDim: Int = 45,
-    var scrollHintOffsetDp: Int = 300
+    var scrollHintOffsetDp: Int = 300,
+    var showSearchBar: Boolean = true,
+    var dockIconSizeDp: Int = 26,
+    var dockOpacity: Int = 0
 )
 
 object LauncherPrefs {
@@ -38,7 +40,6 @@ object LauncherPrefs {
     fun load(c: Context): LauncherSettings {
         val p = prefs(c)
         return LauncherSettings(
-            dark = p.getBoolean("dark", true),
             themeMode = p.getInt("themeMode", 0),
             accentIndex = p.getInt("accent", 0),
             clockSizeSp = p.getInt("clockSize", 58),
@@ -49,13 +50,15 @@ object LauncherPrefs {
             wallpaperUri = p.getString("wallpaperUri", "") ?: "",
             showWork = p.getBoolean("showWork", false),
             wallpaperDim = p.getInt("wallpaperDim", 45),
-            scrollHintOffsetDp = p.getInt("scrollHintOffsetDp", 300)
+            scrollHintOffsetDp = p.getInt("scrollHintOffsetDp", 300),
+            showSearchBar = p.getBoolean("showSearchBar", true),
+            dockIconSizeDp = p.getInt("dockIconSizeDp", 26),
+            dockOpacity = p.getInt("dockOpacity", 0)
         )
     }
 
     fun save(c: Context, s: LauncherSettings) {
         prefs(c).edit()
-            .putBoolean("dark", s.dark)
             .putInt("themeMode", s.themeMode)
             .putInt("accent", s.accentIndex)
             .putInt("clockSize", s.clockSizeSp)
@@ -67,6 +70,9 @@ object LauncherPrefs {
             .putBoolean("showWork", s.showWork)
             .putInt("wallpaperDim", s.wallpaperDim)
             .putInt("scrollHintOffsetDp", s.scrollHintOffsetDp)
+            .putBoolean("showSearchBar", s.showSearchBar)
+            .putInt("dockIconSizeDp", s.dockIconSizeDp)
+            .putInt("dockOpacity", s.dockOpacity)
             .apply()
     }
 
@@ -162,25 +168,47 @@ object LauncherPrefs {
     fun clearWidget(c: Context, id: Int) {
         prefs(c).edit().remove("wlabel_$id").remove("wzone_$id").apply()
     }
+
+    // ---- dock: ordered entries "app:<packageName>" or "folder:<name>" ----
+    fun dockItems(c: Context): List<String> {
+        val raw = prefs(c).getString("dock", null) ?: return emptyList()
+        if (raw.isEmpty()) return emptyList()
+        if (!raw.startsWith("[")) {
+            // legacy | format (folder names containing | were impossible then)
+            return raw.split("|").filter { it.isNotEmpty() }
+        }
+        return try {
+            val out = ArrayList<String>()
+            val arr = org.json.JSONArray(raw)
+            for (i in 0 until arr.length()) out.add(arr.getString(i))
+            out
+        } catch (e: Exception) { emptyList() }
+    }
+
+    fun saveDockItems(c: Context, items: List<String>) {
+        val arr = org.json.JSONArray()
+        for (it in items) arr.put(it)
+        prefs(c).edit().putString("dock", arr.toString()).apply()
+    }
 }
 
 object Theme {
-    fun isDark(s: LauncherSettings) = s.themeMode == 0 || (s.themeMode == 2 && true) // wallpaper treated as dark text
-    fun text(s: LauncherSettings): Int = when {
-        s.themeMode == 2 -> 0xFFF4F6F8.toInt()
-        s.dark -> 0xFFE8EAED.toInt()
-        else -> 0xFF1A1C1E.toInt()
+    fun isDark(s: LauncherSettings) = s.themeMode != 1
+    fun text(s: LauncherSettings): Int = when (s.themeMode) {
+        2 -> 0xFFF4F6F8.toInt()
+        1 -> 0xFF1A1C1E.toInt()
+        else -> 0xFFE8EAED.toInt()
     }
-    fun text2(s: LauncherSettings): Int = when {
-        s.themeMode == 2 -> 0xFFB9C0C6.toInt()
-        s.dark -> 0xFF9AA0A6.toInt()
-        else -> 0xFF5F6368.toInt()
+    fun text2(s: LauncherSettings): Int = when (s.themeMode) {
+        2 -> 0xFFB9C0C6.toInt()
+        1 -> 0xFF5F6368.toInt()
+        else -> 0xFF9AA0A6.toInt()
     }
-    fun bg(s: LauncherSettings): Int = when {
-        s.themeMode == 2 -> android.graphics.Color.argb(
+    fun bg(s: LauncherSettings): Int = when (s.themeMode) {
+        2 -> android.graphics.Color.argb(
             (s.wallpaperDim.coerceIn(0, 90) * 255 / 100), 0, 0, 0)
-        s.dark -> 0xF20B0D10.toInt()
-        else -> 0xF2EEF0F3.toInt()
+        1 -> 0xF2EEF0F3.toInt()
+        else -> 0xF20B0D10.toInt()
     }
     fun fontFamily(index: Int, style: Int): android.graphics.Typeface {
         val family = when (index.coerceIn(0, 3)) {

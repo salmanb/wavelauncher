@@ -13,6 +13,7 @@ node_modules/
 
 # personal screenshots from physical device
 shots/
+# curated README screenshots ARE committed (screenshots/ is not ignored)
 
 # misc
 .DS_Store

@@ -23,8 +23,8 @@ echo "[2/6] aapt2 link -> resources.apk + R.java"
   --manifest AndroidManifest.xml \
   --java "$OUT/gen" \
   --auto-add-overlay \
-  --version-code 34 \
-  --version-name 0.9.7 \
+  --version-code 84 \
+  --version-name 0.12.4 \
   --min-sdk-version 26 \
   --target-sdk-version 34 \
   "$OUT/res.zip"

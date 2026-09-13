@@ -15,15 +15,21 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.graphics.Canvas
+import android.graphics.Point
 import android.view.Gravity
+import android.view.DragEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
+import android.view.HapticFeedbackConstants
 import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
@@ -36,15 +42,16 @@ class MainActivity : BaseLauncherActivity() {
 
     private lateinit var list: ListView
     private lateinit var rail: WaveRailView
-    private lateinit var clock: TextView
-    private lateinit var dateView: TextView
     private lateinit var widgetsHost: LinearLayout
-    private lateinit var widgetsBottom: LinearLayout
+    private lateinit var bottomStack: LinearLayout
+    private lateinit var folderRowScroll: HorizontalScrollView
+    private lateinit var folderRow: LinearLayout
     private lateinit var adapter: HomeAdapter
     private var apps: List<AppEntry> = emptyList()
     private var workApps: List<AppEntry> = emptyList()
     private var workProfilePaused: Boolean = false
     private var folders: MutableMap<String, MutableList<String>> = mutableMapOf()
+    private var dockItems: MutableList<String> = mutableListOf()
     private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var appWidgetHost: AppWidgetHost
@@ -56,21 +63,137 @@ class MainActivity : BaseLauncherActivity() {
         override fun onReceive(c: Context?, i: Intent?) = refreshDots()
     }
 
-    private val tick = object : Runnable {
-        override fun run() { updateClock(); ui.postDelayed(this, 10_000) }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         list = findViewById(R.id.list)
         rail = findViewById(R.id.rail)
-        clock = findViewById(R.id.clock)
-        dateView = findViewById(R.id.date)
         widgetsHost = findViewById(R.id.widgets)
-        widgetsBottom = findViewById(R.id.widgetsBottom)
-        widgetsBottom.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateListBottomInset() }
+        bottomStack = findViewById(R.id.bottomStack)
+        folderRowScroll = findViewById(R.id.folderRowScroll)
+        folderRow = findViewById(R.id.folderRow)
+        bottomStack.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateListBottomInset() }
+        // ONE permanent drag listener on the dock row: handles list-drag drops
+        // (add/append), dock-internal reorder drops (bubbled from cells), and
+        // drag-out removal (dock-internal drags that end outside the dock).
+        val dockRowListener = View.OnDragListener { _, ev ->
+            when (ev.action) {
+                DragEvent.ACTION_DRAG_STARTED -> {
+                    // accept every drag so this listener keeps receiving events
+                    listDragKey != null || draggingDockKey != null
+                }
+                DragEvent.ACTION_DROP -> {
+                    val key = ev.clipData?.getItemAt(0)?.text?.toString()
+                        ?: return@OnDragListener false
+                    // list-drag landing on the row (not a cell): append
+                    if (listDragKey != null && !dockDropConsumed) {
+                        dockDropConsumed = true
+                        if (!dockItems.contains(key)) dockItems.add(key)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        listDragKey = null
+                        rebuildDock()
+                        return@OnDragListener true
+                    }
+                    // dock-internal drag dropped on the row (outside any cell): remove
+                    if (draggingDockKey != null) {
+                        draggingDockKey = null
+                        dockItems.remove(key)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        rebuildDock()
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    folderRowScroll.alpha = 1f
+                    // list-drag that ended without a dock drop: cancel + menu
+                    if (listDragKey != null && !dockDropConsumed) {
+                        val pkg = listDragKey!!.substringAfter(':')
+                        listDragKey = null
+                        (apps + workApps).firstOrNull { it.packageName == pkg }?.let {
+                            editAppFoldersDialog(it)
+                        }
+                    }
+                    draggingDockKey = null
+                    true
+                }
+                else -> true
+            }
+        }
+        bottomStack.setOnDragListener(dockRowListener)
+        // long-press the dock area (empty space): add-folder menu. The HSV's
+        // onTouchEvent does not call super, so View long-press never runs there;
+        // use the same hold-timer pattern as the dock cells, returning false so
+        // scrolling still works.
+        folderRowScroll.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dockAddDown = ev.rawX to ev.rawY
+                    dockHandler.removeCallbacks(dockAddRunnable)
+                    dockHandler.postDelayed(dockAddRunnable, 450)
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val slop = ViewConfiguration.get(this).scaledTouchSlop
+                    if (abs(ev.rawX - dockAddDown.first) > slop || abs(ev.rawY - dockAddDown.second) > slop) {
+                        dockHandler.removeCallbacks(dockAddRunnable)   // scrolling, not a hold
+                    }
+                    false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    dockHandler.removeCallbacks(dockAddRunnable)
+                    false
+                }
+                else -> false
+            }
+        }
+        // root fallback: the dock row is scrollable/gone sometimes; root catches
+        // drops in the whole bottom area and treats "released over the dock" as add
+        findViewById<View>(R.id.root).setOnDragListener { _, ev ->
+            when (ev.action) {
+                DragEvent.ACTION_DRAG_LOCATION -> {
+                    // remember the last drag position
+                    dragX = ev.x; dragY = ev.y
+                    true
+                }
+                DragEvent.ACTION_DROP -> {
+                    android.util.Log.d("WaveWidget", "ROOT DROP: dragY=$dragY")
+                    val key = ev.clipData?.getItemAt(0)?.text?.toString()
+                        ?: return@setOnDragListener false
+                    // was the finger over the dock area?
+                    val loc = IntArray(2)
+                    folderRowScroll.getLocationOnScreen(loc)
+                    val over = dragY >= loc[1] - folderRowScroll.height
+                    if (over && listDragKey != null && !dockDropConsumed) {
+                        dockDropConsumed = true
+                        if (!dockItems.contains(key)) dockItems.add(key)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        listDragKey = null
+                        rebuildDock()
+                    } else if (!over && draggingDockKey != null) {
+                        // dock-internal drag released outside the dock: remove
+                        dockItems.remove(draggingDockKey)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        rebuildDock()
+                        draggingDockKey = null
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    folderRowScroll.alpha = 1f
+                    if (listDragKey != null && !dockDropConsumed) {
+                        val pkg = listDragKey!!.substringAfter(':')
+                        listDragKey = null
+                        (apps + workApps).firstOrNull { it.packageName == pkg }?.let {
+                            editAppFoldersDialog(it)
+                        }
+                    }
+                    draggingDockKey = null
+                    true
+                }
+                else -> true
+            }
+        }
 
         appWidgetHost = AppWidgetHost(this, HOST_ID)
         appWidgetManager = AppWidgetManager.getInstance(this)
@@ -79,8 +202,31 @@ class MainActivity : BaseLauncherActivity() {
         list.adapter = adapter
 
         list.setOnItemClickListener { _, _, pos, _ -> adapter.launch(pos) }
+        // catch drops over the list area: cancel the dock drag + open menu
+        list.setOnDragListener { _, ev ->
+            when (ev.action) {
+                DragEvent.ACTION_DROP -> {
+                    android.util.Log.d("WaveWidget", "LIST DROP (cancel)")
+                    if (draggingDockKey != null) {
+                        // dock-internal drag released over the list: remove
+                        dockItems.remove(draggingDockKey)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        rebuildDock()
+                        draggingDockKey = null
+                    } else if (listDragKey != null && !dockDropConsumed) {
+                        val pkg = listDragKey!!.substringAfter(':')
+                        listDragKey = null
+                        rebuildDock()
+                        (apps + workApps).firstOrNull { it.packageName == pkg }?.let {
+                            editAppFoldersDialog(it)
+                        }
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
 
-        findViewById<TextView>(R.id.corner).setOnClickListener { openDrawer() }
 
         if (intent?.getBooleanExtra("pick_widget", false) == true) pickWidget()
         if (intent?.getBooleanExtra("manage_widgets", false) == true) manageWidgets()
@@ -114,8 +260,8 @@ class MainActivity : BaseLauncherActivity() {
                 appWidgetHost.startListening()
             }
         }
-        ui.postDelayed({ if (isFinishing != true) restoreWidgets() }, 3000)
-        ui.postDelayed({ if (isFinishing != true) restoreWidgets() }, 10000)
+        // late providers are covered by the self-scheduling 2.5s retry in
+        // restoreWidgets; fixed extra passes made miss counters climb too fast
     }
 
     override fun onStop() {
@@ -126,8 +272,7 @@ class MainActivity : BaseLauncherActivity() {
     override fun onResume() {
         super.onResume()
         applyTheme()
-        updateClock()
-        tick.run()
+        rebuildDock()
         reloadApps()
         refreshDots()
     }
@@ -135,7 +280,6 @@ class MainActivity : BaseLauncherActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(countsReceiver) } catch (_: Exception) { }
-        ui.removeCallbacks(tick)
     }
 
     override fun onThemeChanged() {
@@ -156,8 +300,10 @@ class MainActivity : BaseLauncherActivity() {
                 workApps = work
                 workProfilePaused = workPaused
                 folders = LauncherPrefs.folders(this)
+                dockItems = LauncherPrefs.dockItems(this).toMutableList()
                 adapter.buildRows()
                 adapter.notifyDataSetChanged()
+                rebuildDock()
                 setupRail()
             }
         }.start()
@@ -169,30 +315,12 @@ class MainActivity : BaseLauncherActivity() {
         overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
     }
 
-    private fun openDrawer() {
-        startActivity(Intent(this, DrawerActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION))
-        overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
-    }
-
-    private fun updateClock() {
-        val s = settings
-        clock.text = formatClock(this, s.h24)
-        clock.textSize = s.clockSizeSp.toFloat()
-        clock.typeface = Theme.fontFamily(s.fontIndex, Typeface.NORMAL)
-        dateView.text = longDate()
-        dateView.typeface = Theme.fontFamily(s.fontIndex, Typeface.NORMAL)
-    }
-
-    private fun longDate(): String =
-        java.text.SimpleDateFormat("EEEE, MMMM d", Locale.getDefault()).format(Date())
-
     private fun applyTheme() {
         val s = settings
         findViewById<View>(R.id.root).setBackgroundColor(Theme.bg(s))
-        clock.setTextColor(Theme.text(s))
-        dateView.setTextColor(Theme.text2(s))
-        findViewById<TextView>(R.id.corner).setTextColor(Theme.text(s))
+        val barAlpha = (100 - settings.dockOpacity.coerceIn(0, 90)) * 255 / 100
+        val barColor = if (Theme.isDark(s)) 0xFF1B1F24.toInt() else 0xFFE8EAED.toInt()
+        folderRowScroll.setBackgroundColor((barColor and 0x00FFFFFF) or (barAlpha shl 24))
         val accent = LauncherPrefs.accent(s)
         rail.accentColor = accent
         rail.textColor = Theme.text2(s)
@@ -207,16 +335,22 @@ class MainActivity : BaseLauncherActivity() {
 
     // ================= widgets =================
     private fun widgetHeightPx(info: AppWidgetProviderInfo): Int {
-        val d = resources.displayMetrics.density
-        // minHeight is dp per AppWidgetProviderInfo docs
-        val h = (info.minHeight * d).toInt()
-        return h.coerceAtLeast((100 * d).toInt())
+        // minHeight is already in px (framework converts the provider's dp at
+        // parse time); multiplying by density again made cards 2.6-3.5x too tall
+        return info.minHeight.coerceAtLeast(dp(100))
     }
+
+    private var dockAddDown = 0f to 0f
+    private val dockAddRunnable = Runnable { showDockAddMenu() }
+
+    private var pendingWidgetId = -1   // id allocated by bindFlow, consumed in onActivityResult
+    private var restorePending = false // B6: one self-scheduling retry at a time
 
     private fun restoreWidgets() {
         // system-bound ids are the source of truth: getAppWidgetIds() returns every
         // id the system still holds for this host — they survive updates even when
         // our prefs are empty, so adopt any we do not know about yet.
+        restorePending = false
         val systemIds = appWidgetHost.getAppWidgetIds()
         val persisted = LauncherPrefs.widgetIds(this)
         if (systemIds.size != persisted.size) {
@@ -242,7 +376,8 @@ class MainActivity : BaseLauncherActivity() {
                         (hv.parent as? View)?.let { card -> (card.parent as? ViewGroup)?.removeView(card) }
                     }
                     updateListBottomInset()
-                } else if (misses < 5) {
+                } else if (misses < 5 && !restorePending) {
+                    restorePending = true
                     ui.postDelayed({ if (isFinishing != true) restoreWidgets() }, 2500)
                 }
                 continue
@@ -250,8 +385,8 @@ class MainActivity : BaseLauncherActivity() {
             widgetMisses.remove(id)
             systemBound.add(id)
             if (hostedWidgets.containsKey(id)) continue   // healthy card, leave it alone
-            android.util.Log.d(TAG, "attach id=$id zone=${LauncherPrefs.widgetZone(this, id)}")
-            attachWidget(id, info, LauncherPrefs.widgetZone(this, id))
+            android.util.Log.d(TAG, "attach id=$id")
+            attachWidget(id, info)
         }
         updateListBottomInset()
     }
@@ -266,26 +401,287 @@ class MainActivity : BaseLauncherActivity() {
             android.util.Log.d(TAG, "persisted new widget id=$id zone=$z")
         }
         val hostView = appWidgetHost.createView(this, id, info)
-        hostView.setAppWidget(id, info)
         hostedWidgets[id] = hostView
+        // providers that size themselves need real dimensions
+        val d = resources.displayMetrics.density
+        val wDp = (widgetsHost.width / d).toInt().takeIf { it > 0 }
+            ?: (resources.displayMetrics.widthPixels / d).toInt()
+        hostView.updateAppWidgetSize(null, wDp, 100, wDp, 100)
+        widgetsHost.post { hostView.updateAppWidgetSize(null, wDp, (hostView.height / d).toInt().coerceAtLeast(100), wDp, (hostView.height / d).toInt().coerceAtLeast(100)) }
         val card = wrapWidget(hostView, info)
         card.tag = id
         card.setOnLongClickListener {
             confirmRemoveWidget(id, info)
             true
         }
-        val target = if (z == "bottom") widgetsBottom else widgetsHost
-        target.addView(card, widgetParams())
-        if (z == "bottom") updateListBottomInset()
+        widgetsHost.addView(card, widgetParams())
     }
 
     private fun updateListBottomInset() {
-        widgetsBottom.post {
-            val extra = if (widgetsBottom.childCount > 0) widgetsBottom.height + dp(8) else 0
-            list.setPadding(list.paddingLeft, list.paddingTop, list.paddingRight, dp(90) + extra)
+        bottomStack.post {
+            list.setPadding(list.paddingLeft, list.paddingTop, list.paddingRight, bottomStack.height + dp(16))
             list.clipToPadding = false
         }
     }
+
+    /** rounded-rect background for dock items */
+    private fun pillBg(): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 24f * resources.displayMetrics.density
+            setColor(if (Theme.isDark(settings)) 0xFF2A2F36.toInt() else 0xFFE8EAED.toInt())
+        }
+
+    /** long-press on the dock bar itself: add a new empty folder */
+    private fun showDockAddMenu() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Add to dock")
+            .setItems(arrayOf("New folder")) { dlg, _ ->
+                dlg.dismiss()
+                var n = 1
+                while (folders.keys.contains("Folder $n")) n++
+                val name = "Folder $n"
+                folders[name] = mutableListOf()
+                LauncherPrefs.saveFolders(this, folders)
+                if (!dockItems.contains("folder:$name")) dockItems.add("folder:$name")
+                LauncherPrefs.saveDockItems(this, dockItems)
+                adapter.buildRows(); adapter.notifyDataSetChanged(); rebuildDock(); setupRail()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** menu for a dock item: Open / Remove from dock */
+    private fun showDockMenu(key: String) {
+        val e = dockEntry(key) ?: return
+        android.app.AlertDialog.Builder(this)
+            .setTitle(e.label)
+            .setItems(arrayOf("Open", "Remove from dock")) { dlg, which ->
+                dlg.dismiss()
+                when (which) {
+                    0 -> {
+                        if (e.isFolder) openFolderDialog(e.label)
+                        else (apps + workApps).firstOrNull { it.packageName == key.substringAfter(':') }?.launch(this)
+                    }
+                    else -> {
+                        dockItems.remove(key)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        rebuildDock()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** dock entry: "app:<pkg>" or "folder:<name>"; resolve label + icon */
+    private data class DockEntry(val key: String, val label: String, val icon: android.graphics.drawable.Drawable?, val isFolder: Boolean)
+
+    private fun dockEntry(key: String): DockEntry? {
+        val isFolder = key.startsWith("folder:")
+        val id = key.substringAfter(':')
+        if (isFolder) {
+            if (folders[id] == null) return null          // folder deleted
+            return DockEntry(key, id, null, true)
+        }
+        val a = (apps + workApps).firstOrNull { it.packageName == id } ?: return null
+        return DockEntry(key, a.label, a.icon, false)
+    }
+
+    /** visible item count = the number of rows the desktop list shows (viewport / 56dp row) */
+    private fun dockVisibleCount(): Int {
+        val rowH = 56f * resources.displayMetrics.density
+        val listH = list.height.takeIf { it > 0 } ?: (480f * resources.displayMetrics.density).toInt()
+        return (listH / rowH).toInt().coerceIn(4, 10)
+    }
+
+    /** rebuild the dock: one cell per live item; dock resizes to content */
+    private fun rebuildDock() {
+        folderRow.removeAllViews()
+        val density = resources.displayMetrics.density
+        // prune keys that no longer resolve (uninstalled app / deleted folder)
+        if (apps.isNotEmpty()) {
+            val dead = dockItems.filter { dockEntry(it) == null }
+            if (dead.isNotEmpty()) {
+                dockItems.removeAll { it in dead }
+                LauncherPrefs.saveDockItems(this, dockItems)
+            }
+        }
+        val items = dockItems.toList()
+        for ((i, key) in items.withIndex()) {
+            val e = dockEntry(key) ?: continue
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                if (key.startsWith("folder:")) {
+                    // folders stand out: accent outline + tinted bg
+                    background = pillBg().apply {
+                        setStroke((2 * density).toInt(), LauncherPrefs.accent(settings))
+                        setColor((LauncherPrefs.accent(settings) and 0xFFFFFF) or 0x2E000000)
+                    }
+                } else {
+                    background = pillBg()
+                }
+                setPadding((10 * density).toInt(), (6 * density).toInt(), (10 * density).toInt(), (6 * density).toInt())
+                tag = key
+                setOnDragListener { v, ev ->
+                    when (ev.action) {
+                        DragEvent.ACTION_DRAG_ENTERED -> { v.alpha = 0.6f; true }
+                        DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> { v.alpha = 1f; true }
+                        DragEvent.ACTION_DROP -> {
+                            v.alpha = 1f
+                            val dropKey = ev.clipData.getItemAt(0).text.toString()
+                            val targetTag = v.tag as? String
+                            android.util.Log.d("WaveWidget", "cell DROP: dropKey=$dropKey target=$targetTag")
+                            if (dropKey != targetTag) {
+                                if (dockItems.contains(dropKey)) dockItems.remove(dropKey)
+                                // insert BEFORE the cell it was dropped on (existing shifts right)
+                                val at = dockItems.indexOf(targetTag).let { t -> if (t >= 0) t else dockItems.size }
+                                dockItems.add(at.coerceIn(0, dockItems.size), dropKey)
+                                LauncherPrefs.saveDockItems(this@MainActivity, dockItems)
+                            }
+                            if (listDragKey != null) dockDropConsumed = true
+                            draggingDockKey = null
+                            listDragKey = null
+                            rebuildDock()
+                            true
+                        }
+                        else -> true
+                    }
+                }
+            }
+            val iconSize = dp(settings.dockIconSizeDp.coerceIn(14, 48))
+            if (e.isFolder) {
+                // mini preview: up to 3 member icons, in the same order the
+                // folder view shows them (case-insensitive label sort)
+                val memberEntries = (apps + workApps)
+                    .filter { it.packageName in (folders[e.label] ?: emptyList()) }
+                    .sortedWith(Comparator { a, b -> a.label.compareTo(b.label, ignoreCase = true) })
+                val rowIcons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                for (me in memberEntries.take(3)) {
+                    me.icon?.let {
+                        rowIcons.addView(ImageView(this@MainActivity).apply {
+                            setImageDrawable(it)
+                            layoutParams = LinearLayout.LayoutParams(iconSize, iconSize)
+                        })
+                    }
+                }
+                if (rowIcons.childCount == 0) {
+                    rowIcons.addView(TextView(this@MainActivity).apply {
+                        text = "📁"; textSize = 15f
+                    })
+                }
+                cell.addView(rowIcons)
+            } else {
+                cell.addView(ImageView(this@MainActivity).apply {
+                    setImageDrawable(e.icon)
+                    layoutParams = LinearLayout.LayoutParams(iconSize, iconSize)
+                })
+            }
+            cell.addView(TextView(this@MainActivity).apply {
+                text = e.label
+                textSize = 10.5f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                if (e.isFolder) {
+                    // folder label carries the accent too
+                    setTextColor(LauncherPrefs.accent(settings))
+                    setTypeface(typeface, Typeface.BOLD)
+                } else {
+                    setTextColor(Theme.text(settings))
+                }
+            })
+
+            // hold-still: menu pops up while finger is down.
+            // hold-then-move: drag starts (reorder or drag-out to remove).
+            cell.setOnTouchListener { v2, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        dockHandler.removeCallbacks(holdRunnable)
+                        dockHandler.postDelayed(holdRunnable, 450)
+                        holdKey = key
+                        holdView = v2
+                        holdFired = false
+                        downX = ev.rawX; downY = ev.rawY
+                        false
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val slop = ViewConfiguration.get(this@MainActivity).scaledTouchSlop
+                        val moved = abs(ev.rawX - downX) > slop || abs(ev.rawY - downY) > slop
+                        if (!holdFired && moved) {
+                            // let the HorizontalScrollView scroll
+                            dockHandler.removeCallbacks(holdRunnable)
+                            return@setOnTouchListener false
+                        }
+                        if (holdFired && moved) {
+                            dockHandler.removeCallbacks(holdRunnable)
+                            startDockDrag(key, v2)
+                            holdFired = false
+                            return@setOnTouchListener true
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        dockHandler.removeCallbacks(holdRunnable)
+                        val swallow = holdFired   // menu shown: don't launch the app
+                        holdFired = false
+                        swallow
+                    }
+                    else -> false
+                }
+            }
+            cell.setOnClickListener {
+                if (e.isFolder) openFolderDialog(e.label, cell)
+                else (apps + workApps).firstOrNull { it.packageName == e.key.substringAfter(':') }?.launch(this@MainActivity)
+            }
+            cell.layoutParams = android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = (8 * density).toInt()
+            }
+            folderRow.addView(cell)
+        }
+        // empty dock: just the visible bar (add via long-press / app menu)
+        folderRowScroll.visibility = View.VISIBLE
+        folderRowScroll.minimumHeight = dp(64)
+        updateListBottomInset()
+    }
+
+    private var draggingDockKey: String? = null
+    private var listDragKey: String? = null      // item being dragged from the list
+    private var dockDropConsumed = false         // drag was dropped on the dock
+    private val dockHandler = Handler(Looper.getMainLooper())
+    private var holdKey: String? = null
+    private var holdView: View? = null
+    private var holdFired = false
+    private var downX = 0f
+    private var downY = 0f
+    private var touchDragOverlay: View? = null
+    private var touchDragPill: View? = null
+
+    /** long-press fired on a list row; finger still down, no movement yet */
+    private inner class ArmedDrag(val app: AppEntry, val row: View, val armX: Float, val armY: Float)
+    private var armedDrag: ArmedDrag? = null
+    private var ghostRow: View? = null     // list row dimmed while dragging
+    private var lastRawX = 0f
+    private var lastRawY = 0f
+    private var dragX = 0f
+    private var dragY = 0f
+
+    private val holdRunnable = object : Runnable {
+        override fun run() {
+            val k = holdKey ?: return
+            holdFired = true
+            holdView?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            showDockMenu(k)   // menu appears while finger is still down
+        }
+    }
+
+    private fun startDockDrag(key: String, v: View) {
+        draggingDockKey = key
+        val clip = android.content.ClipData.newPlainText("dock", key)
+        v.startDragAndDrop(clip, android.view.View.DragShadowBuilder(v), key, 0)
+    }
+
 
     private fun wrapWidget(hv: AppWidgetHostView, info: AppWidgetProviderInfo): View {
         return FrameLayout(this).apply {
@@ -340,28 +736,10 @@ class MainActivity : BaseLauncherActivity() {
             val name = if (info != null) widgetLabel(info) else "unavailable (id $id)"
             val zone = LauncherPrefs.widgetZone(this, id)
             row.addView(TextView(this).apply {
-                text = "$name\n[$zone]"
+                text = name
                 textSize = 13f; setTextColor(Theme.text(settings))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
-            if (info != null) {
-                val zoneBtn = TextView(this).apply {
-                    text = if (zone == "bottom") "move top" else "move bottom"
-                    textSize = 12f; setTextColor(LauncherPrefs.accent(settings))
-                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                    setOnClickListener {
-                        val nz = if (zone == "bottom") "top" else "bottom"
-                        LauncherPrefs.saveWidgetZone(this@MainActivity, id, nz)
-                        hostedWidgets.remove(id)?.let { hv ->
-                            (hv.parent as? View)?.let { card -> (card.parent as? ViewGroup)?.removeView(card) }
-                        }
-                        attachWidget(id, info, nz)
-                        d.dismiss()
-                        manageWidgets()
-                    }
-                }
-                row.addView(zoneBtn)
-            }
             val rm = TextView(this).apply {
                 text = "Remove"; textSize = 12.5f; setTypeface(typeface, Typeface.BOLD)
                 setTextColor(0xFFF28B82.toInt())
@@ -537,6 +915,7 @@ class MainActivity : BaseLauncherActivity() {
 
     private fun bindFlow(info: AppWidgetProviderInfo) {
         val id = appWidgetHost.allocateAppWidgetId()
+        pendingWidgetId = id
         // ask the system to bind (user consent dialog if needed)
         @Suppress("DEPRECATION")
         val bind = Intent(AppWidgetManager.ACTION_APPWIDGET_BIND).apply {
@@ -556,10 +935,14 @@ class MainActivity : BaseLauncherActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_BIND_WIDGET) {
-            val id = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1)
-                ?: appWidgetHost.appWidgetIds.lastOrNull() ?: -1
+            // use the id we allocated; the intent's extra is often missing on
+            // cancel and guessing from appWidgetIds can free a live widget
+            val id = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1)?.takeIf { it != -1 }
+                ?: pendingWidgetId
+            pendingWidgetId = -1
             if (resultCode != RESULT_OK || id == -1) {
-                appWidgetHost.deleteAppWidgetId(id); return
+                if (id != -1) appWidgetHost.deleteAppWidgetId(id)
+                return
             }
             val info = appWidgetManager.getAppWidgetInfo(id) ?: return
             if (info.configure != null) {
@@ -574,7 +957,9 @@ class MainActivity : BaseLauncherActivity() {
             }
             finishBind(id, info)
         } else if (requestCode == REQ_CONFIG_WIDGET) {
-            val id = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1) ?: -1
+            val id = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1)?.takeIf { it != -1 }
+                ?: pendingWidgetId
+            pendingWidgetId = -1
             val info = appWidgetManager.getAppWidgetInfo(id)
             if (resultCode == RESULT_OK && id != -1 && info != null) finishBind(id, info)
             else if (id != -1 && hostedWidgets[id] == null) appWidgetHost.deleteAppWidgetId(id)
@@ -582,40 +967,9 @@ class MainActivity : BaseLauncherActivity() {
     }
 
     private fun finishBind(id: Int, info: AppWidgetProviderInfo) {
-        askPlacement(id, info)
+        attachWidget(id, info)
     }
 
-    private fun askPlacement(id: Int, info: AppWidgetProviderInfo) {
-        val d = Dialog(this)
-        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(18), dp(22), dp(12))
-        }
-        col.addView(TextView(this).apply {
-            text = "Add ${widgetLabel(info)} to…"
-            textSize = 16f; setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Theme.text(settings))
-            setPadding(0, 0, 0, dp(10))
-        })
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
-        fun choice(label: String, zone: String, accent: Boolean): TextView =
-            TextView(this@MainActivity).apply {
-                text = label; textSize = 14f
-                setTypeface(typeface, if (accent) Typeface.BOLD else Typeface.NORMAL)
-                setTextColor(if (accent) LauncherPrefs.accent(settings) else Theme.text2(settings))
-                setPadding(dp(18), dp(10), dp(18), dp(10))
-                setOnClickListener { d.dismiss(); attachWidget(id, info, zone) }
-            }
-        row.addView(choice("Top of list", "top", false))
-        row.addView(choice("Bottom bar", "bottom", true))
-        col.addView(row)
-        d.setContentView(makeCard(col))
-        d.window?.setBackgroundDrawableResource(android.R.color.transparent)
-        d.show()
-    }
-
-    // ================= rail =================
     private fun setupRail() {
         val letters = linkedSetOf<String>()
         for (row in adapter.rowsIterator()) {
@@ -659,11 +1013,13 @@ class MainActivity : BaseLauncherActivity() {
         list.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    lastRawX = ev.rawX; lastRawY = ev.rawY
                     scrollTouchY = ev.rawY
                     swipeStartY = ev.y
                     showHintAt(ev.rawY)
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    lastRawX = ev.rawX; lastRawY = ev.rawY
                     scrollTouchY = ev.rawY
                     showHintAt(ev.rawY)
                 }
@@ -671,7 +1027,8 @@ class MainActivity : BaseLauncherActivity() {
                     scrollTouchY = -1f
                     rail.hideScrollHint()
                     val dy = ev.y - swipeStartY
-                    if (dy > 140 && list.firstVisiblePosition == 0 &&
+                    val threshold = 56 * resources.displayMetrics.density
+                    if (dy > threshold && list.firstVisiblePosition == 0 &&
                         (list.getChildAt(0)?.top ?: 0) >= 0) {
                         openSearch()
                     }
@@ -737,7 +1094,7 @@ class MainActivity : BaseLauncherActivity() {
         LauncherPrefs.categoryMembers(this, name)
 
     // ================= folder pop-up cards =================
-    private fun makeCard(content: LinearLayout): View {
+    private fun makeCard(content: LinearLayout, above: Int? = null): View {
         val wrap = FrameLayout(this)
         val card = FrameLayout(this)
         card.background = GradientDrawable().apply {
@@ -748,15 +1105,46 @@ class MainActivity : BaseLauncherActivity() {
         card.addView(content, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         wrap.setPadding(dp(28), 0, dp(28), 0)
-        wrap.addView(card, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        if (above != null) {
+            // anchored mode: fixed-width card pinned above the dock icon's x,
+            // bottom near the dock, clamped to stay fully on screen
+            wrap.setPadding(0, 0, 0, 0)   // vertical placement comes from the window y offset
+            wrap.addView(card, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+            wrap.post {
+                // narrow screens: shrink to fit with an 8dp margin
+                card.layoutParams = card.layoutParams.apply {
+                    (this as? FrameLayout.LayoutParams)?.width =
+                        minOf(dp(320), wrap.width - dp(8)).coerceAtLeast(dp(200))
+                    card.layoutParams = this
+                }
+                val target = above - wrap.paddingLeft - card.measuredWidth / 2f
+                val min = dp(4).toFloat()
+                val max = (wrap.width - wrap.paddingLeft - wrap.paddingRight - card.measuredWidth - dp(4)).toFloat().coerceAtLeast(min)
+                card.translationX = target.coerceIn(min, max)
+            }
+        } else {
+            wrap.addView(card, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        }
         return wrap
     }
 
-    private fun openFolderDialog(name: String) {
+    private fun openFolderDialog(name: String, anchor: View? = null) {
         val members = folders[name] ?: return
-        val entries = apps.filter { it.packageName in members } +
-                workApps.filter { it.packageName in members }
+        val entries = (apps.filter { it.packageName in members } +
+                workApps.filter { it.packageName in members })
+            .sortedWith(Comparator { a, b -> a.label.compareTo(b.label, ignoreCase = true) })
+        // anchor geometry from the cell's real on-screen bounds
+        var anchorX: Int? = null
+        var anchorTop: Int? = null
+        if (anchor != null) {
+            val content = findViewById<View>(android.R.id.content)
+            val cl = IntArray(2); content.getLocationOnScreen(cl)
+            val al = IntArray(2); anchor.getLocationOnScreen(al)
+            anchorX = al[0] + anchor.width / 2 - cl[0]
+            anchorTop = al[1] - cl[1]
+        }
         val d = Dialog(this)
         d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
         val col = LinearLayout(this).apply {
@@ -787,42 +1175,63 @@ class MainActivity : BaseLauncherActivity() {
                 textSize = 13f; setTextColor(Theme.text2(settings)); setPadding(0, dp(8), 0, dp(8))
             })
         } else {
-            val lv = ListView(this).apply {
-                divider = null; dividerHeight = 0
+            // 4x5 grid of icons (4 columns, scrollable past 5 rows)
+            val gv = GridView(this).apply {
+                numColumns = 4
+                horizontalSpacing = dp(8); verticalSpacing = dp(10)
+                gravity = Gravity.CENTER
                 adapter = object : BaseAdapter() {
                     override fun getCount() = entries.size
                     override fun getItem(p: Int) = entries[p]
                     override fun getItemId(p: Int) = p.toLong()
                     override fun getView(p: Int, conv: View?, parent: ViewGroup): View {
                         val e = entries[p]
-                        val row = conv ?: LinearLayout(this@MainActivity).apply {
-                            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                            setPadding(dp(4), dp(8), dp(8), dp(8))
+                        val cell = conv ?: LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                            setPadding(dp(4), dp(6), dp(4), dp(6))
                             val iv = ImageView(this@MainActivity)
                             val tv = TextView(this@MainActivity).apply {
-                                textSize = 15f; setTextColor(Theme.text(settings)); maxLines = 1
+                                textSize = 10.5f; setTextColor(Theme.text(settings)); maxLines = 1
+                                ellipsize = android.text.TextUtils.TruncateAt.END
                             }
-                            addView(iv, LinearLayout.LayoutParams(dp(34), dp(34)).apply { rightMargin = dp(14) })
-                            addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                            addView(iv, LinearLayout.LayoutParams(dp(34), dp(34)))
+                            addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
                             tag = Pair(iv, tv)
                         }
-                        val (iv, tv) = row.tag as Pair<ImageView, TextView>
+                        val (iv, tv) = cell.tag as Pair<ImageView, TextView>
                         e.icon?.let { iv.setImageDrawable(it) }
                         tv.text = e.label
-                        row.setOnClickListener { d.dismiss(); e.launch(this@MainActivity) }
-                        return row
+                        cell.setOnClickListener { d.dismiss(); e.launch(this@MainActivity) }
+                        cell.setOnLongClickListener { d.dismiss(); editAppFoldersDialog(e); true }
+                        return cell
                     }
                 }
             }
-            col.addView(lv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (entries.size * dp(52)).coerceAtMost(dp(360))))
+            // cap by the space actually above the dock cell; grid height derives
+            // from ROWS (4 columns), not entries — 8 apps = 2 rows, not 8
+            val rows = (entries.size + 3) / 4
+            val cap = anchorTop?.let { minOf(dp(300), it - dp(8) - dp(96)).coerceAtLeast(dp(58)) } ?: dp(300)
+            col.addView(gv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (rows * dp(58)).coerceAtMost(cap)))
         }
-        d.setContentView(makeCard(col))
+        d.setContentView(makeCard(col, above = anchorX))
         d.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        d.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        if (anchorTop != null) {
+            // bottom-pinned window, y derived from the cell's real bounds:
+            // card bottom sits ~8dp above the tapped cell at any dock height
+            val content = findViewById<View>(android.R.id.content)
+            val lp = d.window!!.attributes
+            lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            lp.y = content.height - anchorTop + dp(8)
+            d.window!!.attributes = lp
+        }
         d.show()
     }
 
     private fun editFolderDialog(name: String) {
         val members = folders[name] ?: mutableListOf()
+        // "Add to dock" shortcut lives in the app-row menu; folders get it here too
+        
         val all = apps + workApps
         val checked = BooleanArray(all.size) { all[it].packageName in members }
         val labels = all.map { it.label + if (it.user != null) " (work)" else "" }.toTypedArray()
@@ -836,52 +1245,266 @@ class MainActivity : BaseLauncherActivity() {
             .setPositiveButton("Save") { dlg, _ ->
                 folders[name] = members
                 LauncherPrefs.saveFolders(this, folders)
-                adapter.buildRows(); adapter.notifyDataSetChanged(); setupRail()
+                adapter.buildRows(); adapter.notifyDataSetChanged(); rebuildDock(); setupRail()
                 dlg.dismiss()
             }
             .setNeutralButton("Delete folder") { dlg, _ ->
                 folders.remove(name)
                 LauncherPrefs.saveFolders(this, folders)
-                adapter.buildRows(); adapter.notifyDataSetChanged(); setupRail()
+                adapter.buildRows(); adapter.notifyDataSetChanged(); rebuildDock(); setupRail()
                 dlg.dismiss()
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
+
+    /** touch-driven list->dock drag: overlay dims the screen, a floating pill
+     *  follows the finger, release over the dock adds the item (AOSP-style). */
+    private fun startListTouchDrag(a: ArmedDrag) {
+        val density = resources.displayMetrics.density
+        listDragKey = "app:" + a.app.packageName
+        ghostRow = a.row
+        a.row.alpha = 0.35f         // row left behind reads as a ghost
+        a.row.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+
+        // full-screen overlay that intercepts the whole gesture
+        val overlay = FrameLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setBackgroundColor(0x33000000)
+        }
+        // the floating pill: icon + label, follows the finger
+        val pill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = pillBg()
+            alpha = 0.9f            // a lifted copy of the row
+            setPadding((12 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (8 * density).toInt())
+            addView(ImageView(this@MainActivity).apply {
+                setImageDrawable(a.app.icon)
+                layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply { marginEnd = dp(6) }
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = a.app.label
+                textSize = 14f
+                setTextColor(Theme.text(settings))
+                maxLines = 1
+            })
+        }
+        overlay.addView(pill, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        touchDragOverlay = overlay   // decorView child: remove THIS to tear down
+        touchDragPill = pill
+        // window content FrameLayout: full-size overlay that actually renders
+        (window.decorView as android.view.ViewGroup).addView(overlay)
+
+        // synchronous measure + layout so the pill never flashes at 0,0
+        pill.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        pill.layout(0, 0, pill.measuredWidth, pill.measuredHeight)
+        positionPill(lastRawX, lastRawY)
+
+        // touch stream is routed via MainActivity.dispatchTouchEvent (the overlay
+        // was added mid-gesture, so it never receives events itself)
+    }
+
+    /** place the pill above the finger given screen (raw) coordinates */
+    private fun positionPill(rawX: Float, rawY: Float) {
+        val pill = touchDragPill ?: return
+        val decorLoc = IntArray(2); window.decorView.getLocationOnScreen(decorLoc)
+        val pillW = pill.measuredWidth.takeIf { it > 0 } ?: 1
+        val pillH = pill.measuredHeight.takeIf { it > 0 } ?: 1
+        if (pill.width == 0) pill.layout(0, 0, pillW, pillH)   // un-laid child draws nothing
+        pill.x = rawX - decorLoc[0] - pillW / 2f
+        pill.y = rawY - decorLoc[1] - pillH - dp(28)          // pill floats above the finger
+    }
+
+    /** tear down the list->dock drag UI */
+    private fun endListTouchDrag() {
+        touchDragOverlay?.let { (window.decorView as android.view.ViewGroup).removeView(it) }
+        touchDragOverlay = null
+        touchDragPill = null
+        ghostRow?.alpha = 1f
+        ghostRow = null
+        armedDrag = null
+        listDragKey = null
+        folderRowScroll.alpha = 1f
+        scrollTouchY = -1f
+        rail.hideScrollHint()   // ListView never sees UP after interception
+    }
+
+    /** intercept the whole touch stream: armed long-press + active list->dock drag */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // row touches are dispatched to the row, never to the list's touch
+        // listener — track the finger here so the arm position is always current
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN || ev.actionMasked == MotionEvent.ACTION_MOVE) {
+            lastRawX = ev.rawX; lastRawY = ev.rawY
+        }
+        val armed = armedDrag
+        if (armed != null && listDragKey == null) {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    // thumbs drift during a 450ms hold; scaledTouchSlop (~8px)
+                    // fires on tremor — require a deliberate drag distance before
+                    // converting the open menu into a drag
+                    val armSlop = dp(14).toFloat()
+                    if (abs(ev.rawX - armed.armX) > armSlop || abs(ev.rawY - armed.armY) > armSlop) {
+                        lastRawX = ev.rawX; lastRawY = ev.rawY
+                        appMenuDialog?.dismiss()       // menu converts into a drag
+                        appMenuDialog = null
+                        startListTouchDrag(armed)      // now dragging; later events hit the block below
+                    }
+                    return true                        // list must not scroll while armed
+                }
+                MotionEvent.ACTION_UP -> {
+                    armedDrag = null
+                    scrollTouchY = -1f; rail.hideScrollHint()
+                    return true                        // menu is already open under the finger
+                }
+                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_DOWN -> {
+                    armedDrag = null
+                    scrollTouchY = -1f; rail.hideScrollHint()
+                    return super.dispatchTouchEvent(ev)
+                }
+                else -> return true
+            }
+        }
+        if (listDragKey == null || touchDragOverlay == null || touchDragPill == null) {
+            return super.dispatchTouchEvent(ev)
+        }
+        // stale-drag guard: a missed UP/CANCEL leaves drag state stuck; a fresh
+        // DOWN clears it so the UI never goes half-dead
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            endListTouchDrag()
+            return super.dispatchTouchEvent(ev)
+        }
+        // window-content coordinates: decorView origin = window origin
+        val decorLoc = IntArray(2)
+        window.decorView.getLocationOnScreen(decorLoc)
+        val sx = ev.rawX - decorLoc[0]
+        val sy = ev.rawY - decorLoc[1]
+        val pill = touchDragPill!!
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_MOVE -> {
+                positionPill(ev.rawX, ev.rawY)
+                val loc = IntArray(2)
+                folderRowScroll.getLocationOnScreen(loc)
+                val dockTop = loc[1] - decorLoc[1]
+                val over = sy >= dockTop || pill.y + pill.height >= dockTop
+                folderRowScroll.alpha = if (over) 1f else 0.75f
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val loc = IntArray(2)
+                folderRowScroll.getLocationOnScreen(loc)
+                val dockTop = loc[1] - decorLoc[1]
+                val overDock = sy >= dockTop || pill.y + pill.height >= dockTop
+                // capture before teardown: the pill's last position drives the hit-test
+                val pillCx = pill.x + pill.width / 2f
+                val pillBottom = pill.y + pill.height
+                val key = listDragKey
+                endListTouchDrag()
+                android.util.Log.d("WaveWidget", "touchDrag end: overDock=$overDock fingerY=$sy dockTop=$dockTop key=$key")
+                if (overDock && key != null) {
+                    // releasing on a folder cell adds the app to that folder.
+                    // the pill floats ~28dp above the finger: hit-test with the
+                    // pill's bottom-center first, the finger as fallback
+                    val dropped = hitTestDockCell(pillCx, pillBottom) ?: hitTestDockCell(sx, sy)
+                    if (dropped != null && dropped.startsWith("folder:")) {
+                        val fname = dropped.substringAfter(':')
+                        val members = folders[fname] ?: mutableListOf()
+                        val pkg = key.substringAfter(':')
+                        if (!members.contains(pkg)) members.add(pkg)
+                        folders[fname] = members
+                        LauncherPrefs.saveFolders(this, folders)
+                        adapter.buildRows(); adapter.notifyDataSetChanged(); rebuildDock(); setupRail()
+                        android.util.Log.d("WaveWidget", "folder add ok: $pkg -> $fname")
+                    } else {
+                        if (!dockItems.contains(key)) dockItems.add(key)
+                        LauncherPrefs.saveDockItems(this, dockItems)
+                        rebuildDock()
+                        android.util.Log.d("WaveWidget", "dock add ok: $key size=${dockItems.size}")
+                    }
+                }
+                // released off the dock: cancel silently (the user chose to drag)
+            }
+        }
+        return true   // consume: the ListView must not scroll while dragging
+    }
+
+    /** the dock cell at window coords (x, y), or null */
+    private fun hitTestDockCell(x: Float, y: Float): String? {
+        val dl = IntArray(2)
+        window.decorView.getLocationOnScreen(dl)
+        for (i in 0 until folderRow.childCount) {
+            val c = folderRow.getChildAt(i)
+            val loc = IntArray(2)
+            c.getLocationOnScreen(loc)
+            val left = loc[0] - dl[0]; val top = loc[1] - dl[1]
+            if (x >= left && x < left + c.width && y >= top && y < top + c.height) {
+                return c.tag as? String
+            }
+        }
+        return null
+    }
+
+    private fun addToDock(key: String) {
+        if (dockItems.contains(key)) dockItems.remove(key)
+        dockItems.add(key)
+        LauncherPrefs.saveDockItems(this, dockItems)
+        rebuildDock()
+    }
+
+    private var appMenuDialog: android.app.AlertDialog? = null
+
     private fun editAppFoldersDialog(app: AppEntry) {
-        val options = arrayOf("Folders…", "Categories…", "New folder with this app", "New category with this app")
-        android.app.AlertDialog.Builder(this)
+        val options = arrayOf("Add to dock", "Folders…", "New folder with this app", "App info", "Uninstall")
+        val menu = android.app.AlertDialog.Builder(this)
             .setTitle(app.label)
             .setItems(options) { dlg, which ->
                 dlg.dismiss()
+                appMenuDialog = null
                 when (which) {
-                    0 -> folderAssignDialog(app)
-                    1 -> categoryAssignDialog(app)
+                    0 -> addToDock("app:" + app.packageName)
+                    1 -> folderAssignDialog(app)
                     2 -> newFolderWithApp(app)
-                    else -> newCategoryPrompt(app)
+                    3 -> {
+                        val i = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                        i.data = android.net.Uri.fromParts("package", app.packageName, null)
+                        i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(i)
+                    }
+                    else -> {
+                        val i = Intent(Intent.ACTION_DELETE)
+                        i.data = android.net.Uri.fromParts("package", app.packageName, null)
+                        i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(i)
+                    }
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
+        appMenuDialog = menu
     }
 
     private fun folderAssignDialog(app: AppEntry) {
         val names = folders.keys.toTypedArray()
         val checked = BooleanArray(names.size) { folders[names[it]]?.contains(app.packageName) == true }
+        // work on copies; commit to live state only on Save (Cancel = no change)
+        val draft = folders.mapValues { it.value.toMutableList() }.toMutableMap()
         val builder = android.app.AlertDialog.Builder(this)
             .setTitle("Folders for “${app.label}”")
         if (names.isNotEmpty()) {
             builder.setMultiChoiceItems(names, checked) { _, which, isChecked ->
                 val pkg = app.packageName
-                if (isChecked) folders[names[which]]?.add(pkg)
-                else folders[names[which]]?.removeAll { it == pkg }
+                if (isChecked) draft[names[which]]?.add(pkg)
+                else draft[names[which]]?.removeAll { it == pkg }
             }
         }
         builder
             .setPositiveButton("Save") { dlg, _ ->
+                folders.clear(); folders.putAll(draft)
                 LauncherPrefs.saveFolders(this, folders)
-                adapter.buildRows(); adapter.notifyDataSetChanged(); setupRail();
+                adapter.buildRows(); adapter.notifyDataSetChanged(); rebuildDock(); setupRail()
                 dlg.dismiss()
             }
             .setNeutralButton("New folder…") { dlg, _ ->
@@ -921,11 +1544,14 @@ class MainActivity : BaseLauncherActivity() {
             .setTitle("New folder")
             .setView(input)
             .setPositiveButton("Create") { _, _ ->
-                val name = input.text.toString().trim()
+                val name = input.text.toString().trim().replace("|", "")
                 if (name.isNotEmpty()) {
-                    folders[name] = mutableListOf(app.packageName)
+                    // existing folder of the same name gains the app; never wiped
+                    folders.getOrPut(name) { mutableListOf() }.let {
+                        if (app.packageName !in it) it.add(app.packageName)
+                    }
                     LauncherPrefs.saveFolders(this, folders)
-                    adapter.buildRows(); adapter.notifyDataSetChanged(); setupRail();
+                    adapter.buildRows(); adapter.notifyDataSetChanged(); rebuildDock(); setupRail()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -985,15 +1611,12 @@ class MainActivity : BaseLauncherActivity() {
         fun buildRows() {
             val s = settings
             val out = ArrayList<HomeRow>()
-            val used = HashSet<String>()
             var idx = 0
             var lastLetter = ""
 
             class Entry(val name: String, val app: AppEntry?)
             val entries = ArrayList<Entry>()
-            for ((name, pkgs) in folders) used.addAll(pkgs)
             for (a in apps) {
-                if (a.packageName in used) continue
                 entries.add(Entry(a.label, a))
             }
             val coll = java.text.Collator.getInstance()
@@ -1018,38 +1641,7 @@ class MainActivity : BaseLauncherActivity() {
                 out.add(HomeRow.WorkHeader)
             }
 
-            // top block: Categories section, then Folders section (only if non-empty)
-            val top = ArrayList<HomeRow>()
-
-            val sortedCats = LauncherPrefs.categories(this@MainActivity).sortedWith(
-                Comparator { a: String, b: String -> a.compareTo(b, ignoreCase = true) })
-            if (sortedCats.isNotEmpty()) {
-                top.add(HomeRow.SectionBanner("CATEGORIES"))
-                for (cname in sortedCats) {
-                    val collapsed = cname !in expandedCategories
-                    top.add(HomeRow.CategoryHeader(cname, collapsed))
-                    if (!collapsed) {
-                        for (a in apps) {
-                            if (a.packageName in catMembers(cname)) top.add(HomeRow.App(a, false))
-                        }
-                    }
-                }
-            }
-
-            val sortedFolders = folders.keys.sortedWith(
-                Comparator { a: String, b: String -> a.compareTo(b, ignoreCase = true) })
-            if (sortedFolders.isNotEmpty()) {
-                top.add(HomeRow.SectionBanner("FOLDERS"))
-                for (fname in sortedFolders) {
-                    val members = folders[fname] ?: emptyList()
-                    top.add(HomeRow.Folder(fname, members))
-                }
-            }
-
-            top.addAll(out)
-            out.clear()
-            out.addAll(top)
-
+            // folders live only in the dock now: plain A-Z list + work + settings
             out.add(HomeRow.SettingsRow)
             rows = out
         }
@@ -1162,7 +1754,15 @@ class MainActivity : BaseLauncherActivity() {
                     vh.dot.visibility = if (n > 0) View.VISIBLE else View.GONE
                     v.isEnabled = true
                     v.setOnClickListener { row.app.launch(this@MainActivity) }
-                    v.setOnLongClickListener { editAppFoldersDialog(row.app); true }
+                    v.setOnLongClickListener {
+                        // long-press fired: show the menu NOW, while the finger is
+                        // still down. dispatchTouchEvent watches for movement — if
+                        // the finger drags past the slop, dismiss the menu and
+                        // start the drag instead (decided per-gesture).
+                        armedDrag = ArmedDrag(row.app, v, lastRawX, lastRawY)
+                        editAppFoldersDialog(row.app)
+                        true
+                    }
                 }
                 is HomeRow.Folder -> {
                     vh.name.visibility = View.VISIBLE
@@ -1175,7 +1775,21 @@ class MainActivity : BaseLauncherActivity() {
                     vh.dot.visibility = View.GONE
                     v.isEnabled = true
                     v.setOnClickListener { openFolderDialog(row.name) }
-                    v.setOnLongClickListener { editFolderDialog(row.name); true }
+                    v.setOnLongClickListener {
+                        val opts = arrayOf("Add to dock", "Edit apps in folder")
+                        android.app.AlertDialog.Builder(this@MainActivity)
+                            .setTitle(row.name)
+                            .setItems(opts) { dlg, which ->
+                                dlg.dismiss()
+                                when (which) {
+                                    0 -> addToDock("folder:" + row.name)
+                                    else -> editFolderDialog(row.name)
+                                }
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
+                        true
+                    }
                 }
             }
             return v

@@ -32,6 +32,7 @@ class NotifListener : NotificationListenerService() {
         try {
             for (n in activeNotifications) {
                 if (n.isOngoing) continue
+                if (n.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY != 0) continue
                 m[n.packageName] = (m[n.packageName] ?: 0) + 1
             }
         } catch (_: Exception) { }
